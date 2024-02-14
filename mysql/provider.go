@@ -2,9 +2,13 @@ package mysql
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"net"
 	"net/url"
@@ -45,6 +49,13 @@ type MySQLConfiguration struct {
 	MaxConnLifetime        time.Duration
 	MaxOpenConns           int
 	ConnectRetryTimeoutSec time.Duration
+}
+
+type CustomTLS struct {
+	ConfigKey  string `json:"config_key"`
+	CACert     string `json:"ca_cert"`
+	ClientCert string `json:"client_cert"`
+	ClientKey  string `json:"client_key"`
 }
 
 var (
@@ -109,6 +120,33 @@ func Provider() *schema.Provider {
 				}, false),
 			},
 
+			"custom_tls": {
+				Type:     schema.TypeList,
+				Optional: true,
+				Default:  nil,
+				Elem: &schema.Resource{
+					Schema: map[string]*schema.Schema{
+						"config_key": {
+							Type:     schema.TypeString,
+							Default:  "custom",
+							Optional: true,
+						},
+						"ca_cert": {
+							Type:     schema.TypeString,
+							Required: true,
+						},
+						"client_cert": {
+							Type:     schema.TypeString,
+							Required: true,
+						},
+						"client_key": {
+							Type:     schema.TypeString,
+							Required: true,
+						},
+					},
+				},
+			},
+
 			"max_conn_lifetime_sec": {
 				Type:     schema.TypeInt,
 				Optional: true,
@@ -167,6 +205,47 @@ func providerConfigure(ctx context.Context, d *schema.ResourceData) (interface{}
 	var allowNativePasswords = authPlugin == nativePasswords
 	var password = d.Get("password").(string)
 
+	var tlsConfig = d.Get("tls").(string)
+	var tlsConfigStruct *tls.Config
+	var customTLS CustomTLS
+
+	customTLSMap := d.Get("custom_tls").([]interface{})
+	if len(customTLSMap) > 0 {
+		customMap := customTLSMap[0].(map[string]interface{})
+		customTLSJson, err := json.Marshal(customMap)
+		if err != nil {
+			return nil, diag.Errorf("failed to marshal tls config: %v", customTLSMap)
+		}
+
+		err = json.Unmarshal(customTLSJson, &customTLS)
+		if err != nil {
+			return nil, diag.Errorf("failed to unmarshal tls config: %v", customTLSJson)
+		}
+
+		rootCertPool := x509.NewCertPool()
+		pem, err := ioutil.ReadFile(customTLS.CACert)
+		if err != nil {
+			return nil, diag.Errorf("failed to read CA cert: %v", err)
+		}
+
+		if ok := rootCertPool.AppendCertsFromPEM(pem); !ok {
+			return nil, diag.Errorf("failed to append pem: %v", pem)
+		}
+
+		clientCert := make([]tls.Certificate, 0, 1)
+		certs, err := tls.LoadX509KeyPair(customTLS.ClientCert, customTLS.ClientKey)
+		if err != nil {
+			return nil, diag.Errorf("error lading keypair: %v", err)
+		}
+		clientCert = append(clientCert, certs)
+		tlsConfigStruct = &tls.Config{
+			RootCAs:      rootCertPool,
+			Certificates: clientCert,
+		}
+		mysql.RegisterTLSConfig(customTLS.ConfigKey, tlsConfigStruct)
+		tlsConfig = customTLS.ConfigKey
+	}
+
 	proto := "tcp"
 	if len(endpoint) > 0 && endpoint[0] == '/' {
 		proto = "unix"
@@ -213,11 +292,15 @@ func providerConfigure(ctx context.Context, d *schema.ResourceData) (interface{}
 		Passwd:                  password,
 		Net:                     proto,
 		Addr:                    endpoint,
-		TLSConfig:               d.Get("tls").(string),
+		TLSConfig:               tlsConfig,
 		AllowNativePasswords:    allowNativePasswords,
 		AllowCleartextPasswords: allowClearTextPasswords,
 		InterpolateParams:       true,
 		Params:                  connParams,
+	}
+
+	if tlsConfigStruct != nil {
+		conf.TLS = tlsConfigStruct
 	}
 
 	dialer, err := makeDialer(d)
@@ -336,6 +419,7 @@ func connectToMySQLInternal(ctx context.Context, conf *MySQLConfiguration) (*One
 	defer connectionCacheMtx.Unlock()
 
 	dsn := conf.Config.FormatDSN()
+	log.Printf("Using DSN: %s", dsn)
 	if connectionCache[dsn] != nil {
 		return connectionCache[dsn], nil
 	}
