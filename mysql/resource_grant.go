@@ -697,20 +697,6 @@ func ImportGrant(ctx context.Context, d *schema.ResourceData, meta interface{}) 
 	return results, nil
 }
 
-func produceGrantId(database string, username string, host string) string {
-	if database != "*" && !strings.HasSuffix(database, "`") {
-		reProcedure := regexp.MustCompile(`(?i)^(function|procedure) (.*)$`)
-		if reProcedure.MatchString(database) {
-			// This is only a hack - user can specify function / procedure as database.
-			database = reProcedure.ReplaceAllString(database, "$1 `${2}`")
-		} else {
-			database = fmt.Sprintf("`%s`", database)
-		}
-	}
-
-	return fmt.Sprintf("%s@%s:%s", database, username, host)
-}
-
 // setDataFromGrant copies the values from MySQLGrant to the schema.ResourceData
 // This function is used when importing a new Grant, or when syncing remote state to Terraform state
 // It is responsible for pulling any non-identifying properties (e.g. grant, tls_option) into the Terraform state
@@ -722,17 +708,14 @@ func setDataFromGrant(grant MySQLGrant, d *schema.ResourceData) *schema.Resource
 		d.Set("grant", grant.GrantOption())
 		d.Set("tls_option", tableGrant.TLSOption)
 		database := tableGrant.Database
-		id := produceGrantId(database, userOrRole.Name, userOrRole.Host)
-		d.SetId(id)
 		d.Set("database", database)
 		d.Set("table", tableGrant.Table)
+		d.SetId(grant.GetId())
 	} else if procedureGrant, ok := grant.(*ProcedurePrivilegeGrant); ok {
 		d.Set("grant", grant.GrantOption())
 		d.Set("tls_option", procedureGrant.TLSOption)
-		database := procedureGrant.Database
-		id := produceGrantId(database, userOrRole.Name, userOrRole.Host)
-		d.SetId(id)
-		d.Set("database", fmt.Sprintf("PROCEDURE %s.%s", database, procedureGrant.CallableName))
+		d.Set("database", fmt.Sprintf("PROCEDURE %s.%s", procedureGrant.Database, procedureGrant.CallableName))
+		d.SetId(grant.GetId())
 	} else if roleGrant, ok := grant.(*RoleGrant); ok {
 		d.Set("grant", grant.GrantOption())
 		d.Set("roles", roleGrant.Roles)

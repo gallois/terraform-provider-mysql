@@ -424,11 +424,11 @@ func testAccPrivilege(rn string, privilege string, expectExists bool, expectGran
 			return err
 		}
 
-		id := strings.Split(rs.Primary.ID, "@")
+		id := strings.Split(rs.Primary.ID, ":")
 
 		var userOrRole UserOrRole
-		if strings.Contains(id[1], ":") {
-			parts := strings.Split(id[1], ":")
+		if strings.Contains(id[0], "@") {
+			parts := strings.Split(id[0], "@")
 			userOrRole = UserOrRole{
 				Name: parts[0],
 				Host: parts[1],
